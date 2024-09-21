@@ -27,14 +27,14 @@ class Architect(object):
               带momentum的梯度下降：v = lr*(-dtheta + v * momentum)
         """
 
-
     def _compute_unrolled_model(self, input, target, eta, network_optimizer):
         # 【完全复制外面的Network更新w的过程】，对应公式6第一项的w − ξ*dwLtrain(w, α)
         # 不直接用外面的optimizer来进行w的更新，而是自己新建一个unrolled_model展开，主要是因为我们这里的更新不能对Network的w进行更新
         loss = self.model._loss(input, target)  # Ltrain
         theta = _concat(self.model.parameters()).data  # 把参数整理成一行代表一个参数的形式,得到我们要更新的参数theta
         try:
-            moment = _concat(network_optimizer.state[v]['momentum_buffer'] for v in self.model.parameters()).mul_(self.network_momentum)  # momentum*v,用的就是Network进行w更新的momentum
+            moment = _concat(network_optimizer.state[v]['momentum_buffer'] for v in self.model.parameters()).mul_(
+                self.network_momentum)  # momentum*v,用的就是Network进行w更新的momentum
         except:
             moment = torch.zeros_like(theta)  # 不加momentum
         # 前面的是loss对参数theta求梯度，self.network_weight_decay*theta就是正则项
@@ -43,7 +43,6 @@ class Architect(object):
         unrolled_model = self._construct_model_from_theta(theta.sub(eta, moment + dtheta))  # w − ξ*dwLtrain(w, α)
 
         return unrolled_model
-
 
     def step(self, input_train, target_train, input_valid, target_valid, eta, network_optimizer, unrolled):
         self.optimizer.zero_grad()  # 清除上一步的残余更新参数值
@@ -54,11 +53,9 @@ class Architect(object):
         self.optimizer.step()  # 应用梯度：根据反向传播得到的梯度进行参数的更新， 这些parameters的梯度是由loss.backward()得到的，optimizer存了这些parameters的指针
         # 因为这个optimizer是针对alpha的优化器，所以他存的都是alpha的参数
 
-
     def _backward_step(self, input_valid, target_valid):
         loss = self.model._loss(input_valid, target_valid)
         loss.backward()  # 反向传播，计算梯度
-
 
     def _backward_step_unrolled(self, input_train, target_train, input_valid, target_valid, eta, network_optimizer):
         # 计算公式六：dαLval(w',α) ，其中w' = w − ξ*dwLtrain(w, α)
@@ -66,7 +63,8 @@ class Architect(object):
         unrolled_model = self._compute_unrolled_model(input_train, target_train, eta,
                                                       network_optimizer)  # unrolled_model里的w已经是做了一次更新后的w，也就是得到了w'
         # Lval
-        unrolled_loss = unrolled_model._loss(input_valid, target_valid)  # 对做了一次更新后的w的unrolled_model求验证集的损失，Lval，以用来对α进行更新
+        unrolled_loss = unrolled_model._loss(input_valid,
+                                             target_valid)  # 对做了一次更新后的w的unrolled_model求验证集的损失，Lval，以用来对α进行更新
 
         unrolled_loss.backward()
         # dαLval(w',α)
@@ -86,7 +84,6 @@ class Architect(object):
             else:
                 v.grad.data.copy_(g.data)
 
-
     # 对应optimizer.step()，对新建的模型的参数进行更新
     def _construct_model_from_theta(self, theta):
         model_new = self.model.new()
@@ -102,7 +99,6 @@ class Architect(object):
         model_dict.update(params)  # 模型中的参数已经更新为做一次反向传播后的值
         model_new.load_state_dict(model_dict)  # 恢复模型中的参数，也就是我新建的mode_new中的参数为model_dict
         return model_new.cuda()
-
 
     # 计算公式八(dαLtrain(w+,α)-dαLtrain(w-,α))/(2*epsilon)   其中w+=w+dw'Lval(w',α)*epsilon w- = w-dw'Lval(w',α)*epsilon
     def _hessian_vector_product(self, vector, input, target, r=1e-2):  # vector就是dw'Lval(w',α)

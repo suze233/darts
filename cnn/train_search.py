@@ -108,7 +108,7 @@ def main():
         lr = scheduler.get_lr()[0]
         logging.info('epoch %d lr %e', epoch, lr)
 
-        genotype = model.genotype()
+        genotype = model.genotype()  # 对应论文2.4 选出来权重值大的两个前驱节点，并把(操作，前驱节点)存下来
         logging.info('genotype = %s', genotype)
 
         print(F.softmax(model.alphas_normal, dim=-1))
@@ -126,29 +126,34 @@ def main():
 
 
 def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
-    objs = utils.AvgrageMeter()
-    top1 = utils.AvgrageMeter()
-    top5 = utils.AvgrageMeter()
+    objs = utils.AvgrageMeter()  # 保存loss
+    top1 = utils.AvgrageMeter()  # top1预测正确的概率
+    top5 = utils.AvgrageMeter()  # top5预测正确的概率
 
-    for step, (input, target) in enumerate(train_queue):
+    for step, (input, target) in enumerate(train_queue):  #每个step取出一个batch，batchsize是64（256个数据对）
         model.train()
         n = input.size(0)
 
         input = input.cuda()
         target = target.cuda()
 
-        input_search, target_search = next(iter(valid_queue))
+        # 用于架构参数更新的一个batch 。使用iter(dataloader)返回的是一个迭代器，然后可以使用next访问；
+        input_search, target_search = next(iter(valid_queue))  # 从验证集中取
         input_search = input_search.cuda()
         target_search = target_search.cuda()
 
+        # 对α进行更新，对应伪代码的第一步，也就是用公式6
         architect.step(input, target, input_search, target_search, lr, optimizer, unrolled=args.unrolled)
-        optimizer.zero_grad()
-        logits = model(input)
-        loss = criterion(logits, target)
 
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        optimizer.step()
+        optimizer.zero_grad()  # 清除之前学到的梯度的参数
+
+        # 对w进行更新，对应伪代码的第二步
+        logits = model(input)  # input来自训练集
+        loss = criterion(logits, target)  # 预测值logits和真实值target的loss
+        loss.backward()  # 反向传播，计算梯度（w）
+
+        nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)  # 梯度裁剪
+        optimizer.step()  # 应用梯度
 
         prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
         objs.update(loss.data.item(), n)

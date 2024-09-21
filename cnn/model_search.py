@@ -159,22 +159,31 @@ class Network(nn.Module):
             for i in range(self._steps):
                 end = start + n
                 W = weights[start:end].copy()
+                """
+                找出来前驱节点的哪两个边的权重最大
+                sorted：对可迭代对象进行排序，key是用来进行比较的元素
+                range(i + 2)表示x取0，1，到i+2 x也就是前驱节点的序号 ，所以W[x]就是这个前驱节点的所有权重[α0,α1,α2,...,α7]
+                max(W[x][k] for k in range(len(W[x])) if k != PRIMITIVES.index('none')) 就是把操作不是NONE的α放到一个list里，得到最大值
+                sorted 就是把每个前驱节点对应的权重最大的值进行逆序排序，然后选出来top2
+                """
                 edges = sorted(range(i + 2), key=lambda x: -max(W[x][k] for k in range(len(W[x])) if k != PRIMITIVES.index('none')))[:2]
+
+                # 把这两条边对应的最大权重的操作找到
                 for j in edges:
                     k_best = None
                     for k in range(len(W[j])):
                         if k != PRIMITIVES.index('none'):
                             if k_best is None or W[j][k] > W[j][k_best]:
                                 k_best = k
-                    gene.append((PRIMITIVES[k_best], j))
+                    gene.append((PRIMITIVES[k_best], j))  # 把(操作，前驱节点序号)放到list gene中，[('sep_conv_3x3', 1),...,]
                 start = end
                 n += 1
             return gene
 
-        gene_normal = _parse(F.softmax(self.alphas_normal, dim=-1).data.cpu().numpy())
-        gene_reduce = _parse(F.softmax(self.alphas_reduce, dim=-1).data.cpu().numpy())
+        gene_normal = _parse(F.softmax(self.alphas_normal, dim=-1).data.cpu().numpy())  # 得到normal cell 的最后选出来的结果
+        gene_reduce = _parse(F.softmax(self.alphas_reduce, dim=-1).data.cpu().numpy())  # 得到reduce cell 的最后选出来的结果
 
-        concat = range(2 + self._steps - self._multiplier, self._steps + 2)
+        concat = range(2 + self._steps - self._multiplier, self._steps + 2)  # [2,3,4,5] 表示对节点2，3，4，5 concat
         genotype = Genotype(
             normal=gene_normal, normal_concat=concat,
             reduce=gene_reduce, reduce_concat=concat
