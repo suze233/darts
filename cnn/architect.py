@@ -40,8 +40,9 @@ class Architect(object):
         # 前面的是loss对参数theta求梯度，self.network_weight_decay*theta就是正则项
         dtheta = _concat(torch.autograd.grad(loss, self.model.parameters())).data + self.network_weight_decay * theta
         # 对参数进行更新，等价于optimizer.step()
-        unrolled_model = self._construct_model_from_theta(theta.sub(eta, moment + dtheta))  # w − ξ*dwLtrain(w, α)
+        # unrolled_model = self._construct_model_from_theta(theta.sub(eta, moment + dtheta))  # w − ξ*dwLtrain(w, α)
 
+        unrolled_model = self._construct_model_from_theta(theta.sub(moment + dtheta, alpha=eta))
         return unrolled_model
 
     def step(self, input_train, target_train, input_valid, target_valid, eta, network_optimizer, unrolled):
@@ -76,7 +77,9 @@ class Architect(object):
 
         # 公式六减公式八 dαLval(w',α)-(dαLtrain(w+,α)-dαLtrain(w-,α))/(2*epsilon)
         for g, ig in zip(dalpha, implicit_grads):
-            g.data.sub_(eta, ig.data)
+            # g.data.sub_(eta, ig.data)
+            g.data.sub_(ig.data, alpha=eta)
+
         # 对α进行更新
         for v, g in zip(self.model.arch_parameters(), dalpha):
             if v.grad is None:
@@ -106,19 +109,20 @@ class Architect(object):
 
         # dαLtrain(w+,α)
         for p, v in zip(self.model.parameters(), vector):
-            p.data.add_(R, v)  # 将模型中所有的w'更新成w+=w+dw'Lval(w',α)*epsilon
+            # p.data.add_(R, v)  # 将模型中所有的w'更新成w+=w+dw'Lval(w',α)*epsilon
+            p.data.add_(v, alpha=R)
         loss = self.model._loss(input, target)
         grads_p = torch.autograd.grad(loss, self.model.arch_parameters())
 
         # dαLtrain(w-,α)
         for p, v in zip(self.model.parameters(), vector):
-            p.data.sub_(2 * R,
-                        v)  # 将模型中所有的w'更新成w- = w+ - (w-)*2*epsilon = w+dw'Lval(w',α)*epsilon - 2*epsilon*dw'Lval(w',α)=w-dw'Lval(w',α)*epsilon
+            # p.data.sub_(2 * R, v)  # 将模型中所有的w'更新成w- = w+ - (w-)*2*epsilon = w+dw'Lval(w',α)*epsilon - 2*epsilon*dw'Lval(w',α)=w-dw'Lval(w',α)*epsilon
+            p.data.sub_(v, alpha=2 * R)
         loss = self.model._loss(input, target)
         grads_n = torch.autograd.grad(loss, self.model.arch_parameters())
 
         # 将模型的参数从w-恢复成w
         for p, v in zip(self.model.parameters(), vector):
-            p.data.add_(R, v)  # w=(w-) +dw'Lval(w',α)*epsilon = w-dw'Lval(w',α)*epsilon + dw'Lval(w',α)*epsilon = w
-
+            # p.data.add_(R, v)  # w=(w-) +dw'Lval(w',α)*epsilon = w-dw'Lval(w',α)*epsilon + dw'Lval(w',α)*epsilon = w
+            p.data.add_(v, alpha=R)
         return [(x - y).div_(2 * R) for x, y in zip(grads_p, grads_n)]
