@@ -27,21 +27,36 @@ class MixedOp(nn.Module):
 class Cell(nn.Module):
 
     def __init__(self, steps, multiplier, C_prev_prev, C_prev, C, reduction, reduction_prev):
+        """
+       初始化cell
+       :param steps: 每个cell中有几个节点
+       :param multiplier: 每个cell的输出通道数是输入通道数的多少倍
+       :param C_prev_prev: cell k-2的输出通道数
+       :param C_prev: cell k-1的输出通道数
+       :param C: 当前cell的输出通道数
+       :param reduction: 当前cell是否是reduction cell
+       :param reduction_prev: cell k-1是否是reduction cell
+       :return:
+        """
+
         super(Cell, self).__init__()
         self.reduction = reduction
         # input nodes的结构固定不变，不参与搜索
-        # 决定第一个input nodes的结构，取决于前一个cell是否是reduction
+        # 决定第一个input nodes的结构，取决于前一个cell(cell k-1)是否是reduction
         if reduction_prev:
-            self.preprocess0 = FactorizedReduce(C_prev_prev, C, affine=False)
+            self.preprocess0 = FactorizedReduce(C_in=C_prev_prev, C_out=C, affine=False)
         else:
             # 第一个input_nodes是cell k-2的输出，cell k-2的输出通道数为C_prev_prev，所以这里操作的输入通道数为C_prev_prev
-            self.preprocess0 = ReLUConvBN(C_prev_prev, C, 1, 1, 0, affine=False)
+            self.preprocess0 = ReLUConvBN(C_in=C_prev_prev, C_out=C, kernel_size=1, stride=1, padding=0, affine=False)
+
         # 第二个input nodes的结构
-        self.preprocess1 = ReLUConvBN(C_prev, C, 1, 1, 0, affine=False)  # 第二个input_nodes是cell k-1的输出
-        self._steps = steps  # 每个cell中有4个节点的连接状态待确定
+        # 第二个input_nodes是cell k-1的输出
+        self.preprocess1 = ReLUConvBN(C_in=C_prev, C_out=C, kernel_size=1, stride=1, padding=0, affine=False)
+        self._steps = steps  # 每个cell中有steps个节点的连接状态待确定
         self._multiplier = multiplier
 
-        self._ops = nn.ModuleList()  # 构建operation的module_list
+        # 构建operation的module_list
+        self._ops = nn.ModuleList()  # 存放混合操作
         self._bns = nn.ModuleList()
         # 遍历4个intermediate nodes构建混合操作
         for i in range(self._steps):
@@ -72,15 +87,7 @@ class Cell(nn.Module):
 class Network(nn.Module):
 
     def __init__(self, C, num_classes, layers, criterion, steps=4, multiplier=4, stem_multiplier=3):
-        """
-        C: 初始通道数
-        num_classes: 分类数
-        layers: cell的数量
-        criterion: 损失函数
-        steps: 每个cell中有几个节点
-        multiplier: 每个cell的输出通道数是输入通道数的多少倍
-        stem_multiplier: stem的通道数是C的多少倍
-        """
+
         super(Network, self).__init__()
         self._C = C
         self._num_classes = num_classes

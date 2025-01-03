@@ -33,8 +33,7 @@ class Architect(object):
         loss = self.model._loss(input, target)  # Ltrain
         theta = _concat(self.model.parameters()).data  # 把参数整理成一行代表一个参数的形式,得到我们要更新的参数theta
         try:
-            moment = _concat(network_optimizer.state[v]['momentum_buffer'] for v in self.model.parameters()).mul_(
-                self.network_momentum)  # momentum*v,用的就是Network进行w更新的momentum
+            moment = _concat(network_optimizer.state[v]['momentum_buffer'] for v in self.model.parameters()).mul_(self.network_momentum)  # momentum*v,用的就是Network进行w更新的momentum
         except:
             moment = torch.zeros_like(theta)  # 不加momentum
         # 前面的是loss对参数theta求梯度，self.network_weight_decay*theta就是正则项

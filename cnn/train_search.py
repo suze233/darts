@@ -98,8 +98,7 @@ def main():
         sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
         pin_memory=True, num_workers=2)
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, float(args.epochs), eta_min=args.learning_rate_min)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, float(args.epochs), eta_min=args.learning_rate_min)
 
     architect = Architect(model, args)
 
@@ -130,7 +129,7 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
     top1 = utils.AvgrageMeter()  # top1预测正确的概率
     top5 = utils.AvgrageMeter()  # top5预测正确的概率
 
-    for step, (input, target) in enumerate(train_queue):  #每个step取出一个batch，batchsize是64（256个数据对）
+    for step, (input, target) in enumerate(train_queue):  # 每个step取出一个batch，batchsize是64（256个数据对）
         model.train()
         n = input.size(0)
 
