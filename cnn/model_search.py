@@ -87,39 +87,54 @@ class Cell(nn.Module):
 class Network(nn.Module):
 
     def __init__(self, C, num_classes, layers, criterion, steps=4, multiplier=4, stem_multiplier=3):
-
         super(Network, self).__init__()
-        self._C = C
+        self._C = C  # 初始通道数
         self._num_classes = num_classes
         self._layers = layers
         self._criterion = criterion
-        self._steps = steps
+        self._steps = steps  # 一个基本单元cell内有4个节点需要进行operation操作的搜索
         self._multiplier = multiplier
 
-        C_curr = stem_multiplier * C
+        C_curr = stem_multiplier * C  # 当前Sequential模块的输出通道数
         self.stem = nn.Sequential(
-            nn.Conv2d(3, C_curr, 3, padding=1, bias=False),
-            nn.BatchNorm2d(C_curr)
+            nn.Conv2d(3, C_curr, 3, padding=1, bias=False),  # 前三个参数分别是输入图片的通道数，卷积核的数量，卷积核的大小
+            nn.BatchNorm2d(C_curr)  # BatchNorm2d对minibatch 3d数据组成的4d输入进行batchnormalization操作，num_features为(N,C,H,W)的C
         )
 
         C_prev_prev, C_prev, C_curr = C_curr, C_curr, C
-        self.cells = nn.ModuleList()
-        reduction_prev = False
-        for i in range(layers):
-            if i in [layers // 3, 2 * layers // 3]:
+        self.cells = nn.ModuleList()  # 创建一个空modulelist类型数据
+        reduction_prev = False  # 连接的前一个cell是否是reduction cell
+        for i in range(layers):  # 网络是8层，在1/3和2/3位置是reduction cell 其他是normal cell，reduction cell的stride是2
+            if i in [layers//3, 2*layers//3]:  # 对应论文的Cells located at the 1/3 and 2/3 of the total depth of the network are reduction cells
                 C_curr *= 2
                 reduction = True
             else:
                 reduction = False
+            # 构建cell
+            # 每个cell的input nodes是前前cell和前一个cell的输出
             cell = Cell(steps, multiplier, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
             reduction_prev = reduction
             self.cells += [cell]
-            C_prev_prev, C_prev = C_prev, multiplier * C_curr
+            # C_prev=multiplier*C_curr是因为每个cell的输出是4个中间节点concat的，这个concat是在通道这个维度，所以输出的通道数变为原来的4倍
+            C_prev_prev, C_prev = C_prev, multiplier*C_curr
 
-        self.global_pooling = nn.AdaptiveAvgPool2d(1)
-        self.classifier = nn.Linear(C_prev, num_classes)
+        self.global_pooling = nn.AdaptiveAvgPool2d(1)  # 构建一个平均池化层，output size是1x1
+        self.classifier = nn.Linear(C_prev, num_classes)  # 构建一个线性分类器
 
-        self._initialize_alphas()
+        self._initialize_alphas()  # 架构参数初始化
+
+        '''
+        cell = Cell(steps, multiplier, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+        layers = 8, 第2和5个cell是reduction_cell
+        cells[0]: cell = Cell(4, 4, 48,  48,  16, false,  false) 输出[N,16*4,h,w]
+        cells[1]: cell = Cell(4, 4, 48,  64,  16, false,  false) 输出[N,16*4,h,w]
+        cells[2]: cell = Cell(4, 4, 64,  64,  32, True,   false) 输出[N,32*4,h,w]
+        cells[3]: cell = Cell(4, 4, 64,  128, 32, false,  false) 输出[N,32*4,h,w]
+        cells[4]: cell = Cell(4, 4, 128, 128, 32, false,  false) 输出[N,32*4,h,w]
+        cells[5]: cell = Cell(4, 4, 128, 128, 64, True,   false) 输出[N,64*4,h,w]
+        cells[6]: cell = Cell(4, 4, 128, 256, 64, false,  false) 输出[N,64*4,h,w]
+        cells[7]: cell = Cell(4, 4, 256, 256, 64, false,  false) 输出[N,64*4,h,w]
+        '''
 
     def new(self):
         model_new = Network(self._C, self._num_classes, self._layers, self._criterion).cuda()

@@ -75,11 +75,13 @@ def main():
     model = model.cuda()
     logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
 
+    # 设置w的优化器
     optimizer = torch.optim.SGD(
-        model.parameters(),
-        args.learning_rate,
-        momentum=args.momentum,
-        weight_decay=args.weight_decay)
+        model.parameters(),  # 优化器更新的参数，这里更新的是w
+        args.learning_rate,  # 初始值是0.025，使用的余弦退火调度更新学习率，每个epoch的学习率都不一样
+        momentum=args.momentum,  # 0.9
+        weight_decay=args.weight_decay  # 正则化参数3e-4
+    )
 
     train_transform, valid_transform = utils._data_transforms_cifar10(args)
     train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
@@ -88,6 +90,7 @@ def main():
     indices = list(range(num_train))
     split = int(np.floor(args.train_portion * num_train))
 
+    # 数据集取一半作为训练集，一半作为验证集
     train_queue = torch.utils.data.DataLoader(
         train_data, batch_size=args.batch_size,
         sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
@@ -98,13 +101,18 @@ def main():
         sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
         pin_memory=True, num_workers=2)
 
+    '''
+    CosineAnnealingLR是余弦退火学习率调度器, 动态调整学习率
+    optimizer: 优化器, 这里是w的优化器
+    '''
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, float(args.epochs), eta_min=args.learning_rate_min)
 
+    # 创建架构
     architect = Architect(model, args)
 
     for epoch in range(args.epochs):
         scheduler.step()
-        lr = scheduler.get_lr()[0]
+        lr = scheduler.get_lr()[0]  # 得到本次迭代的学习率lr
         logging.info('epoch %d lr %e', epoch, lr)
 
         genotype = model.genotype()  # 对应论文2.4 选出来权重值大的两个前驱节点，并把(操作，前驱节点)存下来
@@ -114,7 +122,15 @@ def main():
         print(F.softmax(model.alphas_reduce, dim=-1))
 
         # training
-        train_acc, train_obj = train(train_queue, valid_queue, model, architect, criterion, optimizer, lr)
+        train_acc, train_obj = train(
+            train_queue=train_queue,
+            valid_queue=valid_queue,
+            model=model,
+            architect=architect,
+            criterion=criterion,
+            optimizer=optimizer,  # w的优化器
+            lr=lr  # 当前epoch的学习率
+        )
         logging.info('train_acc %f', train_acc)
 
         # validation
@@ -125,6 +141,17 @@ def main():
 
 
 def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
+    """
+    对应伪代码的第一步和第二步
+    :param train_queue: 训练集
+    :param valid_queue: 验证集
+    :param model: 模型
+    :param architect: 架构
+    :param criterion: 损失函数
+    :param optimizer: w的优化器
+    :param lr: 学习率
+    :return: top1正确率，loss
+    """
     objs = utils.AvgrageMeter()  # 保存loss
     top1 = utils.AvgrageMeter()  # top1预测正确的概率
     top5 = utils.AvgrageMeter()  # top5预测正确的概率
@@ -133,22 +160,31 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
         model.train()
         n = input.size(0)
 
-        input = input.cuda()
-        target = target.cuda()
+        input = input.cuda()  # requires_grad默认为False，不对input求导
+        target = target.cuda(non_blocking=True)  # 使用non_blocking=True代替async=True
 
-        # 用于架构参数更新的一个batch 。使用iter(dataloader)返回的是一个迭代器，然后可以使用next访问；
+        # 更新α是用validation set进行更新的，所以我们每次都从valid_queue拿出一个batch传入architect.step()
+        # 用于alpha更新的一个batch 。使用iter(dataloader)返回的是一个迭代器，然后可以使用next访问；
         input_search, target_search = next(iter(valid_queue))  # 从验证集中取
         input_search = input_search.cuda()
         target_search = target_search.cuda()
 
-        # 对α进行更新，对应伪代码的第一步，也就是用公式6
-        architect.step(input, target, input_search, target_search, lr, optimizer, unrolled=args.unrolled)
+        # 对α进行更新，对应伪代码的第一步 公式6
+        architect.step(
+            input_train=input,
+            target_train=target,
+            input_valid=input_search,
+            target_valid=target_search,
+            eta=lr,
+            network_optimizer=optimizer,  # w的优化器
+            unrolled=args.unrolled
+        )
 
         optimizer.zero_grad()  # 清除之前学到的梯度的参数
 
         # 对w进行更新，对应伪代码的第二步
         logits = model(input)  # input来自训练集
-        loss = criterion(logits, target)  # 预测值logits和真实值target的loss
+        loss = criterion(logits, target)  # 使用预测值logits和真实值target计算loss
         loss.backward()  # 反向传播，计算梯度（w）
 
         nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)  # 梯度裁剪
@@ -164,7 +200,7 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
 
     return top1.avg, objs.avg
 
-
+# 只前向传播，计算loss
 def infer(valid_queue, model, criterion):
     objs = utils.AvgrageMeter()
     top1 = utils.AvgrageMeter()

@@ -23,18 +23,29 @@ class AvgrageMeter(object):
 
 
 def accuracy(output, target, topk=(1,)):
-  maxk = max(topk)
-  batch_size = target.size(0)
+    """
+    Computes the precision@k for the specified values of k
+    :param output: (bs,num_class)是64行10列
+    :param target: (bs,1)
+    :param topk: (1,5)
+    :return: res:(top1的概率，top5的概率)
+    """
+    max_k = max(topk)  # 5
+    batch_size = target.size(0)
 
-  _, pred = output.topk(maxk, 1, True, True)
-  pred = pred.t()
-  correct = pred.eq(target.view(1, -1).expand_as(pred))
+    # output的值是精度，选top5是选这一行精度最大的五个对应的列，也就是属于哪一类
+    _, pred = output.topk(k=max_k, dim=1, largest=True, sorted=True)  # max_k=5，表示dim=1按行取值
 
-  res = []
-  for k in topk:
-    correct_k = correct[:k].reshape(-1).float().sum(0)
-    res.append(correct_k.mul_(100.0/batch_size))
-  return res
+    # pred是(bs,5) 值为类别号，0，1，...,9
+    pred = pred.t() #转置，pred:(5,bs)
+
+    # target原来是64行1列，值为类别；target.view(1, -1)把target拉成一行，expand_as(pred)又把target变成5行64列
+    correct = pred.eq(target.view(1, -1).expand_as(pred))  # pred和target对应位置值相等返回1，不等返回0
+    res = []
+    for k in topk:  # k=1和k=5
+        correct_k = correct[:k].view(-1).float().sum(0)
+        res.append(correct_k.mul_(100.0/batch_size))
+    return res
 
 
 class Cutout(object):
