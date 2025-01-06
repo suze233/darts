@@ -5,7 +5,7 @@ from operations import *
 from torch.autograd import Variable
 from genotypes import PRIMITIVES
 from genotypes import Genotype
-
+from torch_geometric.nn import GCNConv, MessagePassing
 
 class MixedOp(nn.Module):
 
@@ -13,45 +13,50 @@ class MixedOp(nn.Module):
         super(MixedOp, self).__init__()
         self._ops = nn.ModuleList()
         for primitive in PRIMITIVES:  # PRIMITIVES中就是8个操作
-            op = OPS[primitive](C, stride, False)  # OPS中存储了各种操作的函数
-            if 'pool' in primitive:
-                op = nn.Sequential(op, nn.BatchNorm2d(C, affine=False))  # 给池化操作后面加一个batchnormalization
+            op = OPS[primitive](C, stride)  # OPS中存储了各种操作的函数
+            # if 'pool' in primitive:
+            #     op = nn.Sequential(op, nn.BatchNorm2d(C, affine=False))  # 给池化操作后面加一个batchnormalization
             self._ops.append(op)  # 把这些op都放在预先定义好的modulelist里
 
-    def forward(self, x, weights):
+    def forward(self, x, edge, weights):
         # op(x)就是对输入x做一个相应的操作 w1*op1(x)+w2*op2(x)+...+w8*op8(x)
         # 也就是对输入x做8个操作并乘以相应的权重，把结果加起来
-        return sum(w * op(x) for w, op in zip(weights, self._ops))  # 八个操作相乘再相加，公式２
+        # s = 0
+        # for w, op in zip(weights, self._ops):
+        #     print(w, op)
+        #     x = op(x, edge)
+        #     s += w * x
+        #
+        #     print(w, x, s)
+        # return s
+        return sum(w * op(x, edge) for w, op in zip(weights, self._ops))  # 八个操作相乘再相加，公式２
 
 
 class Cell(nn.Module):
 
-    def __init__(self, steps, multiplier, C_prev_prev, C_prev, C, reduction, reduction_prev):
+    def __init__(self, steps, multiplier, reduction, reduction_prev, in_channels, hidden_channels, out_channels):
         """
-       初始化cell
-       :param steps: 每个cell中有几个节点
-       :param multiplier: 每个cell的输出通道数是输入通道数的多少倍
-       :param C_prev_prev: cell k-2的输出通道数
-       :param C_prev: cell k-1的输出通道数
-       :param C: 当前cell的输出通道数
-       :param reduction: 当前cell是否是reduction cell
-       :param reduction_prev: cell k-1是否是reduction cell
-       :return:
+        初始化 GNN cell
+        :param steps: 每个 cell 中有几个节点
+        :param multiplier: 每个 cell 的输出通道数是输入通道数的多少倍
+        :param in_channels: 节点特征的输入通道数
+        :param out_channels: 节点特征的输出通道数
+        :param edge_index: 边的索引，用于定义图的结构
         """
 
         super(Cell, self).__init__()
         self.reduction = reduction
         # input nodes的结构固定不变，不参与搜索
         # 决定第一个input nodes的结构，取决于前一个cell(cell k-1)是否是reduction
-        if reduction_prev:
-            self.preprocess0 = FactorizedReduce(C_in=C_prev_prev, C_out=C, affine=False)
+        if reduction_prev:  # todo 输出 输出维度待确定
+            self.preprocess0 = GCN(in_channels=in_channels, out_channels=hidden_channels)
         else:
             # 第一个input_nodes是cell k-2的输出，cell k-2的输出通道数为C_prev_prev，所以这里操作的输入通道数为C_prev_prev
-            self.preprocess0 = ReLUConvBN(C_in=C_prev_prev, C_out=C, kernel_size=1, stride=1, padding=0, affine=False)
+            self.preprocess0 = GCN(in_channels=in_channels, out_channels=hidden_channels)
 
         # 第二个input nodes的结构
         # 第二个input_nodes是cell k-1的输出
-        self.preprocess1 = ReLUConvBN(C_in=C_prev, C_out=C, kernel_size=1, stride=1, padding=0, affine=False)
+        self.preprocess1 = GCN(in_channels=hidden_channels, out_channels=hidden_channels)
         self._steps = steps  # 每个cell中有steps个节点的连接状态待确定
         self._multiplier = multiplier
 
@@ -63,20 +68,21 @@ class Cell(nn.Module):
             # 遍历当前结点i的所有前驱节点
             for j in range(2 + i):  # 对第i个节点来说，他有j个前驱节点（每个节点的input都由前两个cell的输出和当前cell的前面的节点组成）
                 stride = 2 if reduction and j < 2 else 1
-                op = MixedOp(C, stride)  # op是构建两个节点之间的混合
+                op = MixedOp(hidden_channels, stride)  # op是构建两个节点之间的混合
                 self._ops.append(op)  # 所有边的混合操作添加到ops，list的len为2+3+4+5=14[[],[],...,[]]
 
     # cell中的计算过程，前向传播时自动调用
-    def forward(self, s0, s1, weights):
-        s0 = self.preprocess0(s0)
-        s1 = self.preprocess1(s1)
+    def forward(self, s0, s1, edge_index, weights):
+
+        # s0 = self.preprocess0(s0, edge_index)
+        # s1 = self.preprocess1(s1, edge_index)
 
         states = [s0, s1]  # 当前节点的前驱节点
         offset = 0
         # 遍历每个intermediate nodes，得到每个节点的output
         for i in range(self._steps):
             # s为当前节点i的output，在ops找到i对应的操作，然后对i的所有前驱节点做相应的操作（调用了MixedOp的forward），然后把结果相加
-            s = sum(self._ops[offset + j](h, weights[offset + j]) for j, h in enumerate(states))
+            s = sum(self._ops[offset + j](h, edge_index, weights[offset + j]) for j, h in enumerate(states))
             offset += len(states)
             states.append(s)  # 把当前节点i的output作为下一个节点的输入
             # states中为[s0,s1,b1,b2,b3,b4] b1,b2,b3,b4分别是四个intermediate output的输出
@@ -86,7 +92,7 @@ class Cell(nn.Module):
 
 class Network(nn.Module):
 
-    def __init__(self, C, num_classes, layers, criterion, steps=4, multiplier=4, stem_multiplier=3):
+    def __init__(self, C, num_classes, layers, criterion, in_channels, hidden_channels, out_channels, steps=4, multiplier=4, stem_multiplier=3):
         super(Network, self).__init__()
         self._C = C  # 初始通道数
         self._num_classes = num_classes
@@ -96,10 +102,11 @@ class Network(nn.Module):
         self._multiplier = multiplier
 
         C_curr = stem_multiplier * C  # 当前Sequential模块的输出通道数
-        self.stem = nn.Sequential(
-            nn.Conv2d(3, C_curr, 3, padding=1, bias=False),  # 前三个参数分别是输入图片的通道数，卷积核的数量，卷积核的大小
-            nn.BatchNorm2d(C_curr)  # BatchNorm2d对minibatch 3d数据组成的4d输入进行batchnormalization操作，num_features为(N,C,H,W)的C
-        )
+        # self.stem = nn.Sequential(
+        #     nn.Conv2d(3, C_curr, 3, padding=1, bias=False),  # 前三个参数分别是输入图片的通道数，卷积核的数量，卷积核的大小
+        #     nn.BatchNorm2d(C_curr)  # BatchNorm2d对minibatch 3d数据组成的4d输入进行batchnormalization操作，num_features为(N,C,H,W)的C
+        # )
+        self.stem = GCN(in_channels=in_channels, out_channels=hidden_channels)
 
         C_prev_prev, C_prev, C_curr = C_curr, C_curr, C
         self.cells = nn.ModuleList()  # 创建一个空modulelist类型数据
@@ -112,13 +119,14 @@ class Network(nn.Module):
                 reduction = False
             # 构建cell
             # 每个cell的input nodes是前前cell和前一个cell的输出
-            cell = Cell(steps, multiplier, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+            # cell = Cell(steps, multiplier, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+            cell = Cell(steps, multiplier, reduction, reduction_prev, in_channels, hidden_channels, out_channels)
             reduction_prev = reduction
             self.cells += [cell]
             # C_prev=multiplier*C_curr是因为每个cell的输出是4个中间节点concat的，这个concat是在通道这个维度，所以输出的通道数变为原来的4倍
             C_prev_prev, C_prev = C_prev, multiplier*C_curr
 
-        self.global_pooling = nn.AdaptiveAvgPool2d(1)  # 构建一个平均池化层，output size是1x1
+        # self.global_pooling = nn.AdaptiveAvgPool2d(1)  # 构建一个平均池化层，output size是1x1
         self.classifier = nn.Linear(C_prev, num_classes)  # 构建一个线性分类器
 
         self._initialize_alphas()  # 架构参数初始化
@@ -136,27 +144,27 @@ class Network(nn.Module):
         cells[7]: cell = Cell(4, 4, 256, 256, 64, false,  false) 输出[N,64*4,h,w]
         '''
 
-    def new(self):
-        model_new = Network(self._C, self._num_classes, self._layers, self._criterion).cuda()
-        for x, y in zip(model_new.arch_parameters(), self.arch_parameters()):
-            x.data.copy_(y.data)
-        return model_new
+    # def new(self):
+    #     model_new = Network(self._C, self._num_classes, self._layers, self._criterion).cuda()
+    #     for x, y in zip(model_new.arch_parameters(), self.arch_parameters()):
+    #         x.data.copy_(y.data)
+    #     return model_new
 
-    def forward(self, input):
-        s0 = s1 = self.stem(input)
+    def forward(self, data):
+        s0 = s1 = self.stem(data.x, data.edge_index)
         for i, cell in enumerate(self.cells):
             if cell.reduction:
                 weights = F.softmax(self.alphas_reduce, dim=-1)
             else:
                 weights = F.softmax(self.alphas_normal, dim=-1)  # softmax(式2)
-            s0, s1 = s1, cell(s0, s1, weights)
-        out = self.global_pooling(s1)
-        logits = self.classifier(out.view(out.size(0), -1))
-        return logits
+            s0, s1 = s1, cell(s0, s1, data.edge_index, weights)
+        out = s1
+        # logits = self.classifier(out.view(out.size(0), -1))
+        return out
 
-    def _loss(self, input, target):
-        logits = self(input)
-        return self._criterion(logits, target)
+    def _loss(self, data, idx):
+        logits = self(data)
+        return self._criterion(logits[idx], data.y[idx])
 
     def _initialize_alphas(self):
         k = sum(1 for i in range(self._steps) for n in range(2 + i))

@@ -4,20 +4,22 @@ import time
 import glob
 import numpy as np
 import torch
+import torch_geometric.transforms as T
+from torch_geometric.datasets import Planetoid
+
 import utils
 import logging
 import argparse
 import torch.nn as nn
 import torch.utils
 import torch.nn.functional as F
-import torchvision.datasets as dset
 import torch.backends.cudnn as cudnn
 
 from torch.autograd import Variable
 from model_search import Network
 from architect import Architect
 
-parser = argparse.ArgumentParser("cifar")
+parser = argparse.ArgumentParser("cora")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
 parser.add_argument('--batch_size', type=int, default=64, help='batch size')
 parser.add_argument('--learning_rate', type=float, default=0.025, help='init learning rate')
@@ -26,9 +28,9 @@ parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 parser.add_argument('--weight_decay', type=float, default=3e-4, help='weight decay')
 parser.add_argument('--report_freq', type=float, default=50, help='report frequency')
 parser.add_argument('--gpu', type=int, default=0, help='gpu device id')
-parser.add_argument('--epochs', type=int, default=3, help='num of training epochs')
+parser.add_argument('--epochs', type=int, default=200, help='num of training epochs')
 parser.add_argument('--init_channels', type=int, default=16, help='num of init channels')
-parser.add_argument('--layers', type=int, default=8, help='total number of layers')
+parser.add_argument('--layers', type=int, default=1, help='total number of layers')
 parser.add_argument('--model_path', type=str, default='saved_models', help='path to save the model')
 parser.add_argument('--cutout', action='store_true', default=False, help='use cutout')
 parser.add_argument('--cutout_length', type=int, default=16, help='cutout length')
@@ -42,6 +44,7 @@ parser.add_argument('--arch_learning_rate', type=float, default=3e-4, help='lear
 parser.add_argument('--arch_weight_decay', type=float, default=1e-3, help='weight decay for arch encoding')
 args = parser.parse_args()
 
+# todo
 args.save = 'search-{}-{}'.format(args.save, time.strftime("%Y%m%d-%H%M%S"))
 utils.create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'))
 
@@ -52,7 +55,7 @@ fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
 fh.setFormatter(logging.Formatter(log_format))
 logging.getLogger().addHandler(fh)
 
-CIFAR_CLASSES = 10
+CORA_CLASSES = 7
 
 
 def main():
@@ -71,7 +74,14 @@ def main():
 
     criterion = nn.CrossEntropyLoss()
     criterion = criterion.cuda()
-    model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion)
+
+    dataset = Planetoid(root=args.data, name='Cora')
+    train_data = dataset[0].cuda()  # 获取图数据
+    in_channels = dataset.num_features
+    hidden_channels = args.init_channels
+    out_channels = dataset.num_classes
+
+    model = Network(args.init_channels, CORA_CLASSES, args.layers, criterion, in_channels, hidden_channels, out_channels)
     model = model.cuda()
     logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
 
@@ -83,68 +93,64 @@ def main():
         weight_decay=args.weight_decay  # 正则化参数3e-4
     )
 
-    train_transform, valid_transform = utils._data_transforms_cifar10(args)
-    train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
 
-    num_train = len(train_data)
-    indices = list(range(num_train))
-    split = int(np.floor(args.train_portion * num_train))
+    # num_train = len(train_data)
+    # indices = list(range(num_train))
+    # split = int(np.floor(args.train_portion * num_train))
 
-    # 数据集取一半作为训练集，一半作为验证集
-    train_queue = torch.utils.data.DataLoader(
-        train_data, batch_size=args.batch_size,
-        sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
-        pin_memory=True, num_workers=2)
-
-    valid_queue = torch.utils.data.DataLoader(
-        train_data, batch_size=args.batch_size,
-        sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
-        pin_memory=True, num_workers=2)
+    train_idx = train_data.train_mask.nonzero(as_tuple=True)[0].cuda()
+    valid_idx = train_data.val_mask.nonzero(as_tuple=True)[0].cuda()
 
     '''
     CosineAnnealingLR是余弦退火学习率调度器, 动态调整学习率
     optimizer: 优化器, 这里是w的优化器
     '''
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, float(args.epochs), eta_min=args.learning_rate_min)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        args.epochs,
+        eta_min=args.learning_rate_min
+    )
 
     # 创建架构
     architect = Architect(model, args)
 
     for epoch in range(args.epochs):
         scheduler.step()
-        lr = scheduler.get_lr()[0]  # 得到本次迭代的学习率lr
+        lr = scheduler.get_last_lr()[0]  # 得到本次迭代的学习率lr
         logging.info('epoch %d lr %e', epoch, lr)
 
         genotype = model.genotype()  # 对应论文2.4 选出来权重值大的两个前驱节点，并把(操作，前驱节点)存下来
         logging.info('genotype = %s', genotype)
-
-        print(F.softmax(model.alphas_normal, dim=-1))
-        print(F.softmax(model.alphas_reduce, dim=-1))
+        # todo
+        # print(F.softmax(model.alphas_normal, dim=-1))
+        # print(F.softmax(model.alphas_reduce, dim=-1))
 
         # training
-        train_acc, train_obj = train(
-            train_queue=train_queue,
-            valid_queue=valid_queue,
+        train_auc, train_obj = train(
+            data=train_data,
+            train_idx=train_idx,
+            valid_idx=valid_idx,
             model=model,
             architect=architect,
             criterion=criterion,
             optimizer=optimizer,  # w的优化器
             lr=lr  # 当前epoch的学习率
         )
-        logging.info('train_acc %f', train_acc)
+        logging.info('train_acc %f', train_auc)
 
         # validation
-        valid_acc, valid_obj = infer(valid_queue, model, criterion)
-        logging.info('valid_acc %f', valid_acc)
+        valid_auc, valid_obj = infer(train_data, valid_idx, model, criterion)
+        logging.info('valid_acc %f', valid_auc)
 
         utils.save(model, os.path.join(args.save, 'weights.pt'))
 
 
-def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
+def train(data, train_idx, valid_idx, model, architect, criterion, optimizer, lr):
     """
     对应伪代码的第一步和第二步
-    :param train_queue: 训练集
-    :param valid_queue: 验证集
+    :param data: 全部数据
+    :param train_idx: 训练集索引
+    :param valid_idx: 验证集索引
     :param model: 模型
     :param architect: 架构
     :param criterion: 损失函数
@@ -152,78 +158,110 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
     :param lr: 学习率
     :return: top1正确率，loss
     """
+    data = data.cuda()
+    model = model.cuda()
+
     objs = utils.AvgrageMeter()  # 保存loss
-    top1 = utils.AvgrageMeter()  # top1预测正确的概率
-    top5 = utils.AvgrageMeter()  # top5预测正确的概率
+    auc = utils.AvgrageMeter()  # auc
 
-    for step, (input, target) in enumerate(train_queue):  # 每个step取出一个batch，batchsize是64（256个数据对）
-        model.train()
-        n = input.size(0)
+    model.train()
 
-        input = input.cuda()  # requires_grad默认为False，不对input求导
-        target = target.cuda(non_blocking=True)  # 使用non_blocking=True代替async=True
+    # 对α进行更新，对应伪代码的第一步 公式6
+    architect.step(
+        data=data,
+        train_idx=train_idx,
+        valid_idx=valid_idx,
+        eta=lr,
+        network_optimizer=optimizer,  # w的优化器
+        unrolled=args.unrolled
+    )
 
-        # 更新α是用validation set进行更新的，所以我们每次都从valid_queue拿出一个batch传入architect.step()
-        # 用于alpha更新的一个batch 。使用iter(dataloader)返回的是一个迭代器，然后可以使用next访问；
-        input_search, target_search = next(iter(valid_queue))  # 从验证集中取
-        input_search = input_search.cuda()
-        target_search = target_search.cuda()
+    optimizer.zero_grad()  # 清除之前学到的梯度的参数
 
-        # 对α进行更新，对应伪代码的第一步 公式6
-        architect.step(
-            input_train=input,
-            target_train=target,
-            input_valid=input_search,
-            target_valid=target_search,
-            eta=lr,
-            network_optimizer=optimizer,  # w的优化器
-            unrolled=args.unrolled
-        )
+    # 对w进行更新，对应伪代码的第二步
+    logits = model(data)
+    loss = criterion(logits[train_idx], data.y[train_idx])  # 使用预测值logits和真实值target计算loss
+    loss.backward()  # 反向传播，计算梯度（w）
 
-        optimizer.zero_grad()  # 清除之前学到的梯度的参数
+    nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)  # 梯度裁剪
+    optimizer.step()  # 应用梯度
 
-        # 对w进行更新，对应伪代码的第二步
-        logits = model(input)  # input来自训练集
-        loss = criterion(logits, target)  # 使用预测值logits和真实值target计算loss
-        loss.backward()  # 反向传播，计算梯度（w）
+    _auc = utils.eval_acc(out=logits[train_idx], label=data.y[train_idx])
 
-        nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)  # 梯度裁剪
-        optimizer.step()  # 应用梯度
+    # todo n是什么
+    objs.update(loss.data.item())
+    auc.update(_auc)
 
-        prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-        objs.update(loss.data.item(), n)
-        top1.update(prec1.data.item(), n)
-        top5.update(prec5.data.item(), n)
+    logging.info('train %f %f',  objs.avg, auc.avg)
 
-        if step % args.report_freq == 0:
-            logging.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
 
-    return top1.avg, objs.avg
+    # for step, (input, target) in enumerate(train_queue):  # 每个step取出一个batch，batchsize是64（256个数据对）
+    #     model.train()
+    #     n = input.size(0)
+    #
+    #     input = input.cuda()  # requires_grad默认为False，不对input求导
+    #     target = target.cuda(non_blocking=True)  # 使用non_blocking=True代替async=True
+    #
+    #     # 更新α是用validation set进行更新的，所以我们每次都从valid_queue拿出一个batch传入architect.step()
+    #     # 用于alpha更新的一个batch 。使用iter(dataloader)返回的是一个迭代器，然后可以使用next访问；
+    #     input_search, target_search = next(iter(valid_queue))  # 从验证集中取
+    #     input_search = input_search.cuda()
+    #     target_search = target_search.cuda()
+    #
+    #     # 对α进行更新，对应伪代码的第一步 公式6
+    #     architect.step(
+    #         input_train=input,
+    #         target_train=target,
+    #         input_valid=input_search,
+    #         target_valid=target_search,
+    #         eta=lr,
+    #         network_optimizer=optimizer,  # w的优化器
+    #         unrolled=args.unrolled
+    #     )
+    #
+    #     optimizer.zero_grad()  # 清除之前学到的梯度的参数
+    #
+    #     # 对w进行更新，对应伪代码的第二步
+    #     logits = model(input)  # input来自训练集
+    #     loss = criterion(logits, target)  # 使用预测值logits和真实值target计算loss
+    #     loss.backward()  # 反向传播，计算梯度（w）
+    #
+    #     nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)  # 梯度裁剪
+    #     optimizer.step()  # 应用梯度
+    #
+    #     prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+    #     objs.update(loss.data.item(), n)
+    #     top1.update(prec1.data.item(), n)
+    #     top5.update(prec5.data.item(), n)
+    #
+    #     if step % args.report_freq == 0:
+    #         logging.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+
+    return auc.avg, objs.avg
 
 # 只前向传播，计算loss
-def infer(valid_queue, model, criterion):
+def infer(data, valid_idx, model, criterion):
+    data = data.cuda()
     objs = utils.AvgrageMeter()
-    top1 = utils.AvgrageMeter()
-    top5 = utils.AvgrageMeter()
+    auc = utils.AvgrageMeter()
     model.eval()
     with torch.no_grad():
-        for step, (input, target) in enumerate(valid_queue):
-            input = input.cuda()
-            target = target.cuda()
+        # input = input.cuda()
+        # target = target.cuda()
 
-            logits = model(input)
-            loss = criterion(logits, target)
+        logits = model(data)
+        loss = criterion(logits[valid_idx], data.y[valid_idx])
 
-            prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-            n = input.size(0)
-            objs.update(loss.data.item(), n)
-            top1.update(prec1.data.item(), n)
-            top5.update(prec5.data.item(), n)
+        _auc = utils.eval_acc(out=logits[valid_idx], label=data.y[valid_idx])
 
-            if step % args.report_freq == 0:
-                logging.info('valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+        # n = input.size(0)
+        # todo
+        objs.update(loss.data.item())
+        auc.update(_auc)
 
-    return top1.avg, objs.avg
+        logging.info('valid %f %f', objs.avg, auc.avg)
+
+    return auc.avg, objs.avg
 
 
 if __name__ == '__main__':

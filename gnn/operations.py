@@ -1,25 +1,34 @@
 import torch
 import torch.nn as nn
 from torch_geometric.nn import GCNConv, GATConv
+import torch.nn.functional as F
 
 OPS = {
-    'none': lambda c, stride, affine: Zero(stride),
-    'gat':  lambda c, stride, affine: GATConv(c, c),
-    'gcn':  lambda c, stride, affine: GCNConv(c, c),
+    'none': lambda hidden_channels, stride: GCN(hidden_channels, hidden_channels),
+    # 'gat': lambda hidden_channels, stride: GATConv(hidden_channels, hidden_channels),
+    'gcn': lambda hidden_channels, stride: GCN(hidden_channels, hidden_channels),
 }
 
+#
+# class Zero(nn.Module):
+#
+#     def __init__(self, stride):
+#         super(Zero, self).__init__()
+#         self.stride = stride
+#
+#     def forward(self, x, edge_index):
+#         if self.stride == 1:
+#             return x.mul(0.)
+#         return x[:, :, ::self.stride, ::self.stride].mul(0.)
 
-class Zero(nn.Module):
+class GCN(torch.nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(GCN, self).__init__()
+        self.conv1 = GCNConv(in_channels, out_channels)
 
-    def __init__(self, stride):
-        super(Zero, self).__init__()
-        self.stride = stride
-
-    def forward(self, x):
-        if self.stride == 1:
-            return x.mul(0.)
-        return x[:, :, ::self.stride, ::self.stride].mul(0.)
-
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index)
+        return x
 
 # OPS = {
 #     'none': lambda C, stride, affine: Zero(stride),
